@@ -14,11 +14,25 @@ pub struct ComputedStyle {
     pub font_weight: u16,
     pub margin: f32,
     pub padding: f32,
+    pub border_width: f32,
+    pub box_width: f32,
+    pub box_height: f32,
 }
 
 impl Default for ComputedStyle {
     fn default() -> Self {
-        Self { display: Display::Inline, color: "#111111".into(), background: None, font_size: 16.0, font_weight: 400, margin: 0.0, padding: 0.0 }
+        Self {
+            display: Display::Inline,
+            color: "#111111".into(),
+            background: None,
+            font_size: 16.0,
+            font_weight: 400,
+            margin: 0.0,
+            padding: 0.0,
+            border_width: 0.0,
+            box_width: 0.0,
+            box_height: 0.0,
+        }
     }
 }
 
@@ -29,7 +43,6 @@ struct Rule { selector: String, declarations: BTreeMap<String, String>, specific
 pub struct StyleSheet { rules: Vec<Rule> }
 
 impl StyleSheet {
-    /// Parse a deliberately limited CSS subset. Unsupported at-rules and selectors are ignored.
     pub fn parse(source: &str) -> Self {
         let cleaned = strip_comments(source);
         let mut rules = Vec::new();
@@ -49,6 +62,9 @@ impl StyleSheet {
         style.background = None;
         style.margin = 0.0;
         style.padding = 0.0;
+        style.border_width = 0.0;
+        style.box_width = 0.0;
+        style.box_height = 0.0;
         if let NodeKind::Element { tag, .. } = &doc.nodes[id].kind {
             style.display = if is_hidden_tag(tag) { Display::None } else if is_block_tag(tag) { Display::Block } else { Display::Inline };
             set_user_agent_defaults(tag, &mut style);
@@ -70,7 +86,6 @@ fn set_user_agent_defaults(tag: &str, style: &mut ComputedStyle) {
         "p" | "blockquote" => style.margin = 8.0,
         "ul" | "ol" => style.margin = 8.0,
         "strong" | "b" => style.font_weight = 700,
-        "em" | "i" => {},
         _ => {}
     }
 }
@@ -107,7 +122,9 @@ fn apply(style: &mut ComputedStyle, declarations: &BTreeMap<String, String>) {
             "background" | "background-color" => style.background = Some(value.clone()),
             "font-size" => if let Some(size) = parse_length(value) { style.font_size = size.clamp(1.0, 256.0); },
             "font-weight" => style.font_weight = match value.as_str() { "normal" => 400, "bold" | "bolder" => 700, "lighter" => 300, _ => value.parse::<u16>().ok().filter(|weight| (100..=900).contains(weight)).unwrap_or(style.font_weight) },
-            "margin" | "padding" => if let Some(length) = parse_length(value) { if key == "margin" { style.margin = length; } else { style.padding = length.max(0.0); } },
+            "margin" | "padding" | "border-width" => if let Some(length) = parse_length(value) { match key.as_str() { "margin" => style.margin = length, "padding" => style.padding = length.max(0.0), "border-width" => style.border_width = length.max(0.0), _ => {} } },
+            "width" => style.box_width = parse_length(value).unwrap_or(style.box_width),
+            "height" => style.box_height = parse_length(value).unwrap_or(style.box_height),
             _ => {}
         }
     }
@@ -121,77 +138,92 @@ fn parse_length(value: &str) -> Option<f32> {
 
 fn specificity(selector: &str) -> (usize, usize, usize) {
     let mut ids = 0; let mut classes = 0; let mut tags = 0;
-    for token in selector.split(|c: char| c.is_whitespace() || c == '>') {
-        let mut expect_tag = true;
+    for token in selector.split(|c: char| c.is_whitespace() || c == '>' || c == '+' || c == '~') {
+        if token.is_empty() { continue; }
+        let mut saw_piece = false;
+        let mut tag = false;
         for ch in token.chars() {
             match ch {
-                '#' => { ids += 1; expect_tag = false; }
-                '.' | ':' | '[' => { classes += 1; expect_tag = false; }
-                '*' => expect_tag = false,
-                _ if expect_tag => { tags += 1; expect_tag = false; }
+                '#' => { ids += 1; saw_piece = true; tag = false; }
+                '.' => { classes += 1; saw_piece = true; tag = false; }
+                ':' | '[' => { classes += 1; saw_piece = true; }
+                _ if !saw_piece && !ch.is_ascii_whitespace() => { tag = true; }
                 _ => {}
             }
         }
+        if tag { tags += 1; }
     }
     (ids, classes, tags)
 }
 
 pub fn selector_matches(doc: &Document, id: usize, selector: &str) -> bool {
-    let normalized = selector.replace('>', " > ");
-    let tokens: Vec<&str> = normalized.split_whitespace().collect();
-    if tokens.is_empty() || tokens.iter().any(|token| *token == "+" || *token == "~" || token.starts_with(':') || token.starts_with('[')) { return false; }
+    let selector = selector.trim();
+    if selector.is_empty() { return false; }
+    let mut parts: Vec<&str> = selector.split_whitespace().collect();
+    if parts.is_empty() { return false; }
+    if parts.len() == 1 {
+        return match_selector_component(doc, id, parts[0]);
+    }
     let mut current = id;
-    let mut idx = tokens.len();
-    if !matches_compound(doc, current, tokens[idx - 1]) { return false; }
-    idx -= 1;
-    while idx > 0 {
-        let relation = tokens[idx - 1];
+    let mut index = 0usize;
+    while index < parts.len() {
+        if parts[index] == ">" { index += 1; continue; }
+        if !match_selector_component(doc, current, parts[index]) { return false; }
+        index += 1;
+        if index >= parts.len() { break; }
+        let relation = parts[index];
         if relation == ">" {
-            idx -= 1;
-            if idx == 0 { return false; }
-            let wanted = tokens[idx - 1];
-            let Some(parent) = doc.nodes[current].parent else { return false; };
-            if !matches_compound(doc, parent, wanted) { return false; }
-            current = parent;
-            idx -= 1;
+            if let Some(parent) = doc.nodes[current].parent {
+                current = parent;
+                index += 1;
+            } else { return false; }
         } else {
-            idx -= 1;
-            if idx == 0 { return false; }
-            let wanted = tokens[idx - 1];
-            let Some(mut ancestor) = doc.nodes[current].parent else { return false; };
-            loop {
-                if matches_compound(doc, ancestor, wanted) { current = ancestor; break; }
-                let Some(parent) = doc.nodes[ancestor].parent else { return false; };
-                ancestor = parent;
+            let mut ancestor = match doc.nodes[current].parent { Some(p) => p, None => return false };
+            let mut matched = false;
+            while let Some(parent) = doc.nodes.get(ancestor) {
+                if match_selector_component(doc, ancestor, relation) {
+                    current = ancestor;
+                    matched = true;
+                    break;
+                }
+                match parent.parent { Some(next) => ancestor = next, None => break };
             }
-            idx -= 1;
+            if !matched { return false; }
+            index += 1;
         }
     }
     true
 }
 
-fn matches_compound(doc: &Document, id: usize, compound: &str) -> bool {
-    let NodeKind::Element { tag, .. } = &doc.nodes[id].kind else { return false; };
-    let bytes = compound.as_bytes();
-    let mut tag_end = 0;
-    while tag_end < bytes.len() && bytes[tag_end] != b'#' && bytes[tag_end] != b'.' { tag_end += 1; }
-    if tag_end > 0 {
-        let wanted = &compound[..tag_end];
-        if wanted != "*" && !wanted.eq_ignore_ascii_case(tag) { return false; }
-    }
-    let mut i = tag_end;
-    while i < bytes.len() {
-        let marker = bytes[i]; i += 1;
-        let start = i;
-        while i < bytes.len() && bytes[i] != b'#' && bytes[i] != b'.' { i += 1; }
-        if start == i { return false; }
-        let value = &compound[start..i];
-        if marker == b'#' {
-            if doc.element_attribute(id, "id") != Some(value) { return false; }
-        } else {
-            let Some(class_attr) = doc.element_attribute(id, "class") else { return false; };
-            if !class_attr.split_whitespace().any(|class| class == value) { return false; }
+fn match_selector_component(doc: &Document, id: usize, selector: &str) -> bool {
+    let NodeKind::Element { tag, attributes } = &doc.nodes[id].kind else { return false; };
+    let selector = selector.trim();
+    if selector.is_empty() { return false; }
+    let mut tag_name = "";
+    let mut simple = String::new();
+    let mut idx = 0usize;
+    while idx < selector.len() {
+        let ch = selector.as_bytes()[idx] as char;
+        if ch == '#' || ch == '.' {
+            break;
         }
+        tag_name.push(ch);
+        idx += 1;
+    }
+    if !tag_name.is_empty() && !tag_name.eq_ignore_ascii_case(tag) && tag_name != "*" { return false; }
+    simple = selector[idx..].to_string();
+    let mut id_matches = true;
+    let mut class_matches = true;
+    if let Some(hash_pos) = simple.find('#') {
+        let value = &simple[hash_pos + 1..];
+        id_matches = attributes.get("id").is_some_and(|v| v == value);
+    }
+    if let Some(dot_start) = simple.rfind('.') {
+        let classes = &simple[dot_start + 1..];
+        class_matches = classes.split('.').all(|class| attributes.get("class").is_some_and(|value| value.split_whitespace().any(|item| item == class)));
+    }
+    if selector.contains('#') || selector.contains('.') {
+        return id_matches && class_matches;
     }
     true
 }

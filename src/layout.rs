@@ -27,7 +27,6 @@ impl Flow {
     fn bottom(&self) -> f32 { self.y + if self.has_content { self.line_height } else { 0.0 } }
 }
 
-/// Construct a simple block/inline flow display list. This is intentionally not CSS 2.1 layout.
 pub fn layout(doc: &Document, sheet: &StyleSheet, width: f32) -> DisplayList {
     let width = if width.is_finite() { width.max(1.0) } else { 800.0 };
     let mut list = DisplayList { width, ..DisplayList::default() };
@@ -66,7 +65,6 @@ fn layout_block(doc: &Document, sheet: &StyleSheet, id: usize, style: &ComputedS
     let content_x = box_x + padding;
     let content_y = box_y + padding;
     let content_width = (flow.width - padding * 2.0).max(1.0);
-    let text_start = list.text.len();
     let mut inner = Flow::new(content_x, content_y, content_width, style.font_size);
     layout_children(doc, sheet, id, &mut inner, style, list);
     let content_bottom = inner.bottom();
@@ -77,10 +75,8 @@ fn layout_block(doc: &Document, sheet: &StyleSheet, id: usize, style: &ComputedS
     if matches!(&doc.nodes[id].kind, NodeKind::Element { tag, .. } if tag == "hr") {
         list.rects.push(Rect { x: box_x, y: box_y + (height - 1.0) / 2.0, width: flow.width, height: 1.0, color: "#888888".into() });
     }
-    // Basic list formatting: list items receive a visible marker in the display list.
     if matches!(&doc.nodes[id].kind, NodeKind::Element { tag, .. } if tag == "li") {
-        let marker_y = box_y + padding + style.font_size;
-        list.text.insert(text_start, TextRun { x: (box_x + padding - 16.0).max(0.0), y: marker_y, text: "•".into(), size: style.font_size, weight: style.font_weight, color: style.color.clone() });
+        list.text.push(TextRun { x: (box_x + padding - 16.0).max(0.0), y: box_y + padding + style.font_size, text: "•".into(), size: style.font_size, weight: style.font_weight, color: style.color.clone() });
     }
     flow.y = box_y + height + margin;
     flow.x = flow.start_x;
