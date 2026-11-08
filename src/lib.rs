@@ -37,4 +37,17 @@ mod tests {
         assert_eq!(page.query("p.note").len(), 1);
         assert_eq!(page.query("main p").len(), 2);
     }
+
+    #[test]
+    fn session_history_tracks_navigation() {
+        let mut page = BrowserSession::from_html("<p>one</p>");
+        assert_eq!(page.history_len(), 1);
+        page.load_html("<p>two</p>");
+        page.load_html("<p>three</p>");
+        assert!(page.can_go_back());
+        assert!(page.back());
+        assert!(page.document().nodes.iter().any(|node| matches!(&node.kind, crate::dom::NodeKind::Text(text) if text == "two")));
+        assert!(page.forward());
+        assert!(page.document().nodes.iter().any(|node| matches!(&node.kind, crate::dom::NodeKind::Text(text) if text == "three")));
+    }
 }

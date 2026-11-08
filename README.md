@@ -20,6 +20,7 @@ cargo run -- page.html --dump-dom
 - Lightweight DOM and forgiving HTML subset parser.
 - CSS subset with tag/class/ID, descendant and child selectors, cascade ordering, colors, display, font size/weight, margins and padding.
 - Approximate block and inline text flow, wrapping, hidden elements, backgrounds, `<br>`, and list-item bullets.
+- Browser-session navigation and document history with back/forward traversal.
 - SVG display-list output and unit tests for parsing, styling, layout, and escaping.
 
 These are hand-built subsets, not standards-conformant implementations. Font measurement is estimated, list styles are basic, and SVG is the only output backend.
