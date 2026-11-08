@@ -7,64 +7,157 @@ pub struct TextRun { pub x: f32, pub y: f32, pub text: String, pub size: f32, pu
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DisplayList { pub rects: Vec<Rect>, pub text: Vec<TextRun>, pub width: f32, pub height: f32 }
 
+#[derive(Debug, Clone)]
+struct Flow {
+    start_x: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    line_height: f32,
+    has_content: bool,
+}
+
+impl Flow {
+    fn new(x: f32, y: f32, width: f32, font_size: f32) -> Self {
+        Self { start_x: x, x, y, width: width.max(1.0), line_height: font_size * 1.35, has_content: false }
+    }
+
+    fn finish_line(&mut self) {
+        if self.has_content {
+            self.y += self.line_height;
+            self.x = self.start_x;
+            self.has_content = false;
+            self.line_height = 0.0;
+        }
+    }
+
+    fn bottom(&self) -> f32 {
+        self.y + if self.has_content { self.line_height } else { 0.0 }
+    }
+}
+
+/// Construct a simple block/inline flow display list. This is intentionally not CSS 2.1 layout.
 pub fn layout(doc: &Document, sheet: &StyleSheet, width: f32) -> DisplayList {
-    let mut list = DisplayList { width: width.max(1.0), ..DisplayList::default() };
+    let width = if width.is_finite() { width.max(1.0) } else { 800.0 };
+    let mut list = DisplayList { width, ..DisplayList::default() };
     let inherited = ComputedStyle::default();
-    let bottom = layout_children(doc, sheet, 0, 8.0, 8.0, (width - 16.0).max(1.0), &inherited, &mut list);
-    list.height = (bottom + 8.0).max(64.0);
+    let mut flow = Flow::new(8.0, 8.0, (width - 16.0).max(1.0), inherited.font_size);
+    layout_children(doc, sheet, 0, &mut flow, &inherited, &mut list);
+    list.height = (flow.bottom() + 8.0).max(64.0);
     list
 }
 
-fn layout_children(doc: &Document, sheet: &StyleSheet, parent: usize, x: f32, mut y: f32, width: f32, inherited: &ComputedStyle, list: &mut DisplayList) -> f32 {
-    let children = doc.nodes[parent].children.clone();
-    for child in children {
+fn layout_children(doc: &Document, sheet: &StyleSheet, parent: usize, flow: &mut Flow, inherited: &ComputedStyle, list: &mut DisplayList) {
+    for &child in &doc.nodes[parent].children {
         match &doc.nodes[child].kind {
-            NodeKind::Text(text) => {
-                let style = inherited;
-                let lines = wrap_text(text, width, style.font_size);
-                for line in &lines {
-                    if !line.is_empty() { list.text.push(TextRun { x, y: y + style.font_size, text: line.clone(), size: style.font_size, color: style.color.clone() }); }
-                    y += style.font_size * 1.35;
-                }
-                if lines.is_empty() { y += style.font_size * 1.35; }
-            }
-            NodeKind::Element { .. } => {
+            NodeKind::Text(text) => append_text(text, inherited, flow, list),
+            NodeKind::Element { tag, .. } => {
                 let style = sheet.compute(doc, child, inherited);
                 if style.display == Display::None { continue; }
-                let margin = style.margin;
-                y += margin;
-                let child_x = x + style.padding;
-                let child_width = (width - style.padding * 2.0).max(1.0);
-                if let Some(color) = &style.background {
-                    list.rects.push(Rect { x, y, width, height: style.font_size * 1.5 + style.padding * 2.0, color: color.clone() });
+                if tag == "br" {
+                    if flow.has_content { flow.finish_line(); }
+                    else { flow.y += flow.line_height.max(inherited.font_size * 1.35); }
+                    flow.line_height = inherited.font_size * 1.35;
+                    continue;
                 }
-                let before = y;
-                let bottom = layout_children(doc, sheet, child, child_x, y + style.padding, child_width, &style, list);
-                let height = (bottom - before + style.padding).max(style.font_size * 1.35);
-                if let Some(rect) = list.rects.iter_mut().rev().find(|r| (r.x - x).abs() < f32::EPSILON && (r.y - y).abs() < f32::EPSILON) { rect.height = height; }
-                y = before + height + margin;
+                if style.display == Display::Block {
+                    flow.finish_line();
+                    layout_block(doc, sheet, child, &style, flow, list);
+                } else {
+                    layout_children(doc, sheet, child, flow, &style, list);
+                }
             }
             NodeKind::Document => {}
         }
     }
-    y
 }
 
-fn wrap_text(text: &str, width: f32, size: f32) -> Vec<String> {
-    let max_chars = ((width / (size * 0.56).max(1.0)).floor() as usize).max(1);
-    let mut lines = Vec::new(); let mut line = String::new();
-    for word in text.split_whitespace() {
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > max_chars {
-            lines.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() { line.push(' '); }
-        line.push_str(word);
-        while line.chars().count() > max_chars {
-            let tail: String = line.chars().skip(max_chars).collect();
-            line = line.chars().take(max_chars).collect();
-            lines.push(std::mem::replace(&mut line, tail));
-        }
+fn layout_block(doc: &Document, sheet: &StyleSheet, id: usize, style: &ComputedStyle, flow: &mut Flow, list: &mut DisplayList) {
+    let margin = style.margin.max(0.0);
+    let padding = style.padding.max(0.0);
+    let box_x = flow.start_x;
+    let box_y = flow.y + margin;
+    let content_x = box_x + padding;
+    let content_y = box_y + padding;
+    let content_width = (flow.width - padding * 2.0).max(1.0);
+    let mut inner = Flow::new(content_x, content_y, content_width, style.font_size);
+    layout_children(doc, sheet, id, &mut inner, style, list);
+    let content_bottom = inner.bottom();
+    let content_height = (content_bottom - content_y).max(style.font_size * 1.35);
+    let height = content_height + padding * 2.0;
+
+    if let Some(color) = &style.background {
+        list.rects.push(Rect { x: box_x, y: box_y, width: flow.width, height, color: color.clone() });
     }
-    if !line.is_empty() { lines.push(line); }
-    lines
+    if matches!(&doc.nodes[id].kind, NodeKind::Element { tag, .. } if tag == "hr") {
+        list.rects.push(Rect { x: box_x, y: box_y + (height - 1.0) / 2.0, width: flow.width, height: 1.0, color: "#888888".into() });
+    }
+
+    flow.y = box_y + height + margin;
+    flow.x = flow.start_x;
+    flow.has_content = false;
+    flow.line_height = style.font_size * 1.35;
+}
+
+fn append_text(text: &str, style: &ComputedStyle, flow: &mut Flow, list: &mut DisplayList) {
+    // Whitespace collapsing is approximate; preserve word boundaries while avoiding one run per character.
+    for word in text.split_whitespace() {
+        let word_width = estimated_width(word, style.font_size);
+        let space_width = if flow.has_content { estimated_width(" ", style.font_size) } else { 0.0 };
+        if flow.has_content && flow.x + space_width + word_width > flow.start_x + flow.width {
+            flow.finish_line();
+        }
+        if flow.has_content {
+            flow.x += estimated_width(" ", style.font_size);
+        }
+        list.text.push(TextRun {
+            x: flow.x,
+            y: flow.y + style.font_size,
+            text: word.to_string(),
+            size: style.font_size,
+            color: style.color.clone(),
+        });
+        flow.x += word_width;
+        flow.has_content = true;
+        flow.line_height = flow.line_height.max(style.font_size * 1.35);
+    }
+}
+
+fn estimated_width(text: &str, font_size: f32) -> f32 {
+    text.chars().count() as f32 * font_size * 0.56
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_text_at_viewport_and_keeps_inline_text_together() {
+        let doc = crate::html::parse("<p>alpha <span>beta</span> gamma delta epsilon</p>");
+        let list = layout(&doc, &StyleSheet::default(), 120.0);
+        assert!(list.text.iter().any(|run| run.text == "alpha"));
+        assert!(list.text.iter().any(|run| run.text == "beta"));
+        let ys: Vec<f32> = list.text.iter().map(|run| run.y).collect();
+        assert!(ys.windows(2).any(|pair| pair[1] > pair[0]));
+    }
+
+    #[test]
+    fn computes_block_background_and_padding_box() {
+        let doc = crate::html::parse("<div style='background: #ffeeaa; padding: 10px'>hello</div>");
+        let sheet = StyleSheet::default();
+        let list = layout(&doc, &sheet, 300.0);
+        assert_eq!(list.rects.len(), 1);
+        assert_eq!(list.rects[0].x, 8.0);
+        assert_eq!(list.rects[0].width, 284.0);
+        assert!(list.rects[0].height >= 40.0);
+    }
+
+    #[test]
+    fn hidden_content_does_not_paint() {
+        let doc = crate::html::parse("<style>.gone { display: none }</style><p class='gone'>secret</p><p>visible</p>");
+        let sheet = StyleSheet::parse(".gone { display: none }");
+        let list = layout(&doc, &sheet, 300.0);
+        assert!(!list.text.iter().any(|run| run.text == "secret"));
+        assert!(list.text.iter().any(|run| run.text == "visible"));
+    }
 }
