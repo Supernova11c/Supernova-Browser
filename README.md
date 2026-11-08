@@ -1,30 +1,60 @@
-# Supernova Browser Engine
+//! Experimental browser-engine building blocks for Supernova.
+//! This crate is a learning/prototyping project, not a standards-compliant or secure browser.
 
-Supernova is an experimental browser-engine foundation written in Rust. It parses a limited HTML subset, applies basic CSS, lays out block and inline text flow, and exports an SVG display list.
+pub mod browser;
+pub mod css;
+pub mod dom;
+pub mod engine;
+pub mod html;
+pub mod layout;
+pub mod paint;
 
-> **Status:** prototype, not a production or Chromium-compatible browser. HTML/CSS implementations are incomplete; JavaScript, networking, accessibility, media, security sandboxing, and web-platform conformance are not implemented. Do not use it to browse untrusted content.
+pub use browser::BrowserSession;
+pub use engine::{BrowserEngine, EngineError};
 
-## Build and run
+#[cfg(test)]
+mod tests {
+    use super::{BrowserEngine, BrowserSession};
 
-Requires stable Rust (1.70+).
+    #[test]
+    fn parses_and_renders_html() {
+        let svg = BrowserEngine::new().render_html("<h1 class='hero'>Hello</h1><p>World</p>");
+        assert!(svg.contains("Hello"));
+        assert!(svg.contains("World"));
+        assert!(svg.contains("<svg"));
+    }
 
-```sh
-cargo test
-cargo run -- page.html --output page.svg
-cargo run -- --html '<h1>Hello, Supernova!</h1>' --output page.svg
-cargo run -- page.html --dump-dom
-```
+    #[test]
+    fn escapes_text_in_svg() {
+        let svg = BrowserEngine::new().render_html("<p>A &amp; B</p>");
+        assert!(svg.contains("A &amp; B"));
+        assert!(!svg.contains("A & B"));
+    }
 
-## Current milestones
+    #[test]
+    fn session_query_finds_matching_nodes() {
+        let page = BrowserSession::from_html("<main><p class='note'>one</p><p>two</p></main>");
+        assert_eq!(page.query("p.note").len(), 1);
+        assert_eq!(page.query("main p").len(), 2);
+    }
 
-- Lightweight DOM and forgiving HTML subset parser, including quoted `>` attributes, raw-text elements, selected named/numeric entities, and basic implied paragraph/list-item closing.
-- CSS subset with tag/class/ID, descendant and child selectors, cascade ordering, colors, display, font size/weight, margins and padding.
-- Approximate block and inline text flow, wrapping, hidden elements, backgrounds, `<br>`, and list-item bullets.
-- Browser-session navigation and document history with back/forward traversal.
-- SVG display-list output and unit tests for parsing, styling, layout, and escaping.
+    #[test]
+    fn session_history_tracks_navigation() {
+        let mut page = BrowserSession::from_html("<p>one</p>");
+        page.load_html("<p>two</p>");
+        page.load_html("<p>three</p>");
+        assert!(page.back());
+        assert!(page.document().nodes.iter().any(|node| matches!(&node.kind, crate::dom::NodeKind::Text(text) if text == "two")));
+        assert!(page.forward());
+        assert!(page.document().nodes.iter().any(|node| matches!(&node.kind, crate::dom::NodeKind::Text(text) if text == "three")));
+    }
 
-These are hand-built subsets, not standards-conformant implementations. Font measurement is estimated, list styles are basic, and SVG is the only output backend.
-
-## Architecture and roadmap
-
-Subsystems live in `src/html.rs`, `src/dom.rs`, `src/css.rs`, `src/layout.rs`, `src/paint.rs`, and `src/engine.rs`. A complete browser also requires standards-tested HTML/CSS, JavaScript, networking and caching, image/font/media decoding, accessibility and input, strong process/security boundaries, platform rendering, and extensive conformance/performance tests.
+    #[test]
+    fn document_helpers_find_nodes_and_ancestors() {
+        let doc = crate::html::parse("<main><section id='hero'><p>ok</p></section></main>");
+        let hero = doc.find_by_id("hero").unwrap();
+        let p = doc.find_all_by_tag("p")[0];
+        assert_eq!(doc.ancestors_of(p), vec![hero, 1]);
+        assert_eq!(doc.tag_name(hero), Some("section"));
+    }
+}
