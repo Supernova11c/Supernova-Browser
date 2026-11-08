@@ -1,0 +1,16 @@
+[package]
+name = "supernova-browser"
+version = "0.1.0"
+edition = "2021"
+description = "An experimental, modular browser-engine foundation written in Rust"
+license = "Apache-2.0"
+
+[lib]
+name = "supernova_browser"
+path = "src/lib.rs"
+
+[[bin]]
+name = "supernova"
+path = "src/main.rs"
+
+[dependencies]
