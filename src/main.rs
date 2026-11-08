@@ -1,41 +1,42 @@
-use std::{env, fs, process};
-use supernova_browser::{html, BrowserEngine};
+//! Experimental browser-engine building blocks for Supernova.
+//! This crate is a learning/prototyping project, not a standards-compliant or secure browser.
 
-fn main() {
-    if let Err(message) = run() { eprintln!("supernova: {message}"); process::exit(2); }
-}
+pub mod browser;
+pub mod css;
+pub mod dom;
+pub mod engine;
+pub mod html;
+pub mod layout;
+pub mod paint;
 
-fn run() -> Result<(), String> {
-    let mut args = env::args().skip(1);
-    let mut input = None;
-    let mut inline_html = None;
-    let mut output = None;
-    let mut dump_dom = false;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--html" => inline_html = Some(args.next().ok_or("--html requires a string")?),
-            "--output" | "-o" => output = Some(args.next().ok_or("--output requires a path")?),
-            "--dump-dom" => dump_dom = true,
-            "--help" | "-h" => { print_help(); return Ok(()); }
-            _ if arg.starts_with('-') => return Err(format!("unknown option: {arg}")),
-            _ if input.is_none() => input = Some(arg),
-            _ => return Err(format!("unexpected argument: {arg}")),
-        }
+pub use browser::BrowserSession;
+pub use engine::{BrowserEngine, EngineError};
+
+#[cfg(test)]
+mod tests {
+    use super::BrowserEngine;
+
+    #[test]
+    fn parses_and_renders_html() {
+        let engine = BrowserEngine::new();
+        let svg = engine.render_html("<h1 class='hero'>Hello</h1><p>World</p>");
+        assert!(svg.contains("Hello"));
+        assert!(svg.contains("World"));
+        assert!(svg.contains("<svg"));
     }
-    let source = if let Some(html) = inline_html { html } else if let Some(path) = input {
-        fs::read_to_string(&path).map_err(|e| format!("could not read {path}: {e}"))?
-    } else { print_help(); return Ok(()); };
-    let engine = BrowserEngine::new();
-    if dump_dom {
-        print!("{}", html::parse(&source).to_indented_string());
-        return Ok(());
-    }
-    let svg = engine.render_html(&source);
-    if let Some(path) = output { fs::write(&path, svg).map_err(|e| format!("could not write {path}: {e}"))?; }
-    else { print!("{svg}"); }
-    Ok(())
-}
 
-fn print_help() {
-    println!("Supernova Browser Engine (experimental)\n\nUSAGE:\n  supernova <FILE> [--output <SVG>] [--dump-dom]\n  supernova --html <HTML> [--output <SVG>]\n");
+    #[test]
+    fn escapes_text_in_svg() {
+        let engine = BrowserEngine::new();
+        let svg = engine.render_html("<p>A &amp; B</p>");
+        assert!(svg.contains("A &amp; B"));
+        assert!(!svg.contains("A & B"));
+    }
+
+    #[test]
+    fn parses_closing_tags_and_attributes() {
+        let doc = crate::html::parse("<div id='x'><br><p>ok</p></div>");
+        assert!(doc.nodes.iter().any(|n| matches!(&n.kind, crate::dom::NodeKind::Element { tag, .. } if tag == "br")));
+        assert!(doc.nodes.iter().any(|n| matches!(&n.kind, crate::dom::NodeKind::Element { attributes, .. } if attributes.get("id").is_some_and(|v| v == "x"))));
+    }
 }

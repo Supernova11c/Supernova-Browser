@@ -102,9 +102,10 @@ fn parse_length(value: &str) -> Option<f32> {
 
 fn specificity(selector: &str) -> (usize, usize, usize) {
     let mut ids = 0; let mut classes = 0; let mut tags = 0;
-    for part in selector.split(|c: char| c.is_whitespace() || c == '>') {
+    let tokens = selector.split(|c: char| c.is_whitespace() || c == '>');
+    for token in tokens {
         let mut expect_tag = true;
-        for ch in part.chars() {
+        for ch in token.chars() {
             match ch {
                 '#' => { ids += 1; expect_tag = false; }
                 '.' | ':' | '[' => { classes += 1; expect_tag = false; }
@@ -117,57 +118,73 @@ fn specificity(selector: &str) -> (usize, usize, usize) {
     (ids, classes, tags)
 }
 
-/// Match compound tag/class/id selectors joined by descendant whitespace or child `>` combinators.
-fn selector_matches(doc: &Document, id: usize, selector: &str) -> bool {
+pub fn selector_matches(doc: &Document, id: usize, selector: &str) -> bool {
     let normalized = selector.replace('>', " > ");
     let tokens: Vec<&str> = normalized.split_whitespace().collect();
-    if tokens.is_empty() || tokens.iter().any(|token| *token == "+" || *token == "~" || token.starts_with(':') || token.starts_with('[')) { return false; }
-    let mut index = tokens.len();
-    let mut current = Some(id);
-    if !matches_compound(doc, id, tokens[index - 1]) { return false; }
-    index -= 1;
-    while index > 0 {
-        let child_relation = tokens[index - 1] == ">";
-        if child_relation { index -= 1; }
-        if index == 0 { return false; }
-        let wanted = tokens[index - 1];
-        let Some(mut ancestor) = doc.nodes[current.unwrap()].parent else { return false };
-        if child_relation {
-            if !matches_compound(doc, ancestor, wanted) { return false; }
-        } else {
-            loop {
-                if matches_compound(doc, ancestor, wanted) { break; }
-                let Some(parent) = doc.nodes[ancestor].parent else { return false };
-                ancestor = parent;
-            }
+    if tokens.is_empty() || tokens.iter().any(|token| *token == "+" || *token == "~" || token.starts_with(':') || token.starts_with('[')) {
+        return false;
+    }
+
+    let mut current = id;
+    let mut idx = tokens.len();
+    if !matches_compound(doc, current, tokens[idx - 1]) { return false; }
+    idx -= 1;
+
+    while idx > 0 {
+        let relation = tokens[idx - 1];
+        if relation == ">" {
+            idx -= 1;
+            if idx == 0 { return false; }
+            let wanted = tokens[idx - 1];
+            let Some(parent) = doc.nodes[current].parent else { return false; };
+            if !matches_compound(doc, parent, wanted) { return false; }
+            current = parent;
+            idx -= 1;
+            continue;
         }
-        current = Some(ancestor);
-        index -= 1;
+
+        idx -= 1;
+        if idx == 0 { return false; }
+        let wanted = tokens[idx - 1];
+        let Some(mut ancestor) = doc.nodes[current].parent else { return false; };
+        loop {
+            if matches_compound(doc, ancestor, wanted) {
+                current = ancestor;
+                break;
+            }
+            let Some(parent) = doc.nodes[ancestor].parent else { return false; };
+            ancestor = parent;
+        }
+        idx -= 1;
     }
     true
 }
 
 fn matches_compound(doc: &Document, id: usize, compound: &str) -> bool {
-    let NodeKind::Element { tag, .. } = &doc.nodes[id].kind else { return false };
+    let NodeKind::Element { tag, .. } = &doc.nodes[id].kind else { return false; };
     let bytes = compound.as_bytes();
-    let mut i = 0;
     let mut tag_end = 0;
-    while tag_end < bytes.len() && bytes[tag_end] != b'#' && bytes[tag_end] != b'.' { tag_end += 1; }
+    while tag_end < bytes.len() && bytes[tag_end] != b'#' && bytes[tag_end] != b'.' {
+        tag_end += 1;
+    }
     if tag_end > 0 {
         let wanted = &compound[..tag_end];
         if wanted != "*" && !wanted.eq_ignore_ascii_case(tag) { return false; }
     }
-    i = tag_end;
+    let mut i = tag_end;
     while i < bytes.len() {
-        let marker = bytes[i]; i += 1;
+        let marker = bytes[i];
+        i += 1;
         let start = i;
-        while i < bytes.len() && bytes[i] != b'#' && bytes[i] != b'.' { i += 1; }
+        while i < bytes.len() && bytes[i] != b'#' && bytes[i] != b'.' {
+            i += 1;
+        }
         if start == i { return false; }
         let value = &compound[start..i];
         if marker == b'#' {
             if doc.element_attribute(id, "id") != Some(value) { return false; }
         } else {
-            let Some(class_attr) = doc.element_attribute(id, "class") else { return false };
+            let Some(class_attr) = doc.element_attribute(id, "class") else { return false; };
             if !class_attr.split_whitespace().any(|class| class == value) { return false; }
         }
     }
