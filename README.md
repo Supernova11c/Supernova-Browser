@@ -17,7 +17,7 @@ cargo run -- page.html --dump-dom
 
 ## Current milestones
 
-- Lightweight DOM and forgiving HTML subset parser.
+- Lightweight DOM and forgiving HTML subset parser, including quoted `>` attributes, raw-text elements, selected named/numeric entities, and basic implied paragraph/list-item closing.
 - CSS subset with tag/class/ID, descendant and child selectors, cascade ordering, colors, display, font size/weight, margins and padding.
 - Approximate block and inline text flow, wrapping, hidden elements, backgrounds, `<br>`, and list-item bullets.
 - Browser-session navigation and document history with back/forward traversal.
