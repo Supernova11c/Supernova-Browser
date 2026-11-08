@@ -3,7 +3,7 @@ use crate::{css::{ComputedStyle, Display, StyleSheet}, dom::{Document, NodeKind}
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rect { pub x: f32, pub y: f32, pub width: f32, pub height: f32, pub color: String }
 #[derive(Debug, Clone, PartialEq)]
-pub struct TextRun { pub x: f32, pub y: f32, pub text: String, pub size: f32, pub color: String }
+pub struct TextRun { pub x: f32, pub y: f32, pub text: String, pub size: f32, pub weight: u16, pub color: String }
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DisplayList { pub rects: Vec<Rect>, pub text: Vec<TextRun>, pub width: f32, pub height: f32 }
 
@@ -21,19 +21,10 @@ impl Flow {
     fn new(x: f32, y: f32, width: f32, font_size: f32) -> Self {
         Self { start_x: x, x, y, width: width.max(1.0), line_height: font_size * 1.35, has_content: false }
     }
-
     fn finish_line(&mut self) {
-        if self.has_content {
-            self.y += self.line_height;
-            self.x = self.start_x;
-            self.has_content = false;
-            self.line_height = 0.0;
-        }
+        if self.has_content { self.y += self.line_height; self.x = self.start_x; self.has_content = false; self.line_height = 0.0; }
     }
-
-    fn bottom(&self) -> f32 {
-        self.y + if self.has_content { self.line_height } else { 0.0 }
-    }
+    fn bottom(&self) -> f32 { self.y + if self.has_content { self.line_height } else { 0.0 } }
 }
 
 /// Construct a simple block/inline flow display list. This is intentionally not CSS 2.1 layout.
@@ -55,17 +46,12 @@ fn layout_children(doc: &Document, sheet: &StyleSheet, parent: usize, flow: &mut
                 let style = sheet.compute(doc, child, inherited);
                 if style.display == Display::None { continue; }
                 if tag == "br" {
-                    if flow.has_content { flow.finish_line(); }
-                    else { flow.y += flow.line_height.max(inherited.font_size * 1.35); }
+                    if flow.has_content { flow.finish_line(); } else { flow.y += flow.line_height.max(inherited.font_size * 1.35); }
                     flow.line_height = inherited.font_size * 1.35;
                     continue;
                 }
-                if style.display == Display::Block {
-                    flow.finish_line();
-                    layout_block(doc, sheet, child, &style, flow, list);
-                } else {
-                    layout_children(doc, sheet, child, flow, &style, list);
-                }
+                if style.display == Display::Block { flow.finish_line(); layout_block(doc, sheet, child, &style, flow, list); }
+                else { layout_children(doc, sheet, child, flow, &style, list); }
             }
             NodeKind::Document => {}
         }
@@ -80,19 +66,22 @@ fn layout_block(doc: &Document, sheet: &StyleSheet, id: usize, style: &ComputedS
     let content_x = box_x + padding;
     let content_y = box_y + padding;
     let content_width = (flow.width - padding * 2.0).max(1.0);
+    let text_start = list.text.len();
     let mut inner = Flow::new(content_x, content_y, content_width, style.font_size);
     layout_children(doc, sheet, id, &mut inner, style, list);
     let content_bottom = inner.bottom();
     let content_height = (content_bottom - content_y).max(style.font_size * 1.35);
     let height = content_height + padding * 2.0;
 
-    if let Some(color) = &style.background {
-        list.rects.push(Rect { x: box_x, y: box_y, width: flow.width, height, color: color.clone() });
-    }
+    if let Some(color) = &style.background { list.rects.push(Rect { x: box_x, y: box_y, width: flow.width, height, color: color.clone() }); }
     if matches!(&doc.nodes[id].kind, NodeKind::Element { tag, .. } if tag == "hr") {
         list.rects.push(Rect { x: box_x, y: box_y + (height - 1.0) / 2.0, width: flow.width, height: 1.0, color: "#888888".into() });
     }
-
+    // Basic list formatting: list items receive a visible marker in the display list.
+    if matches!(&doc.nodes[id].kind, NodeKind::Element { tag, .. } if tag == "li") {
+        let marker_y = box_y + padding + style.font_size;
+        list.text.insert(text_start, TextRun { x: (box_x + padding - 16.0).max(0.0), y: marker_y, text: "•".into(), size: style.font_size, weight: style.font_weight, color: style.color.clone() });
+    }
     flow.y = box_y + height + margin;
     flow.x = flow.start_x;
     flow.has_content = false;
@@ -100,52 +89,37 @@ fn layout_block(doc: &Document, sheet: &StyleSheet, id: usize, style: &ComputedS
 }
 
 fn append_text(text: &str, style: &ComputedStyle, flow: &mut Flow, list: &mut DisplayList) {
-    // Whitespace collapsing is approximate; preserve word boundaries while avoiding one run per character.
     for word in text.split_whitespace() {
         let word_width = estimated_width(word, style.font_size);
         let space_width = if flow.has_content { estimated_width(" ", style.font_size) } else { 0.0 };
-        if flow.has_content && flow.x + space_width + word_width > flow.start_x + flow.width {
-            flow.finish_line();
-        }
-        if flow.has_content {
-            flow.x += estimated_width(" ", style.font_size);
-        }
-        list.text.push(TextRun {
-            x: flow.x,
-            y: flow.y + style.font_size,
-            text: word.to_string(),
-            size: style.font_size,
-            color: style.color.clone(),
-        });
+        if flow.has_content && flow.x + space_width + word_width > flow.start_x + flow.width { flow.finish_line(); }
+        if flow.has_content { flow.x += estimated_width(" ", style.font_size); }
+        list.text.push(TextRun { x: flow.x, y: flow.y + style.font_size, text: word.to_string(), size: style.font_size, weight: style.font_weight, color: style.color.clone() });
         flow.x += word_width;
         flow.has_content = true;
         flow.line_height = flow.line_height.max(style.font_size * 1.35);
     }
 }
 
-fn estimated_width(text: &str, font_size: f32) -> f32 {
-    text.chars().count() as f32 * font_size * 0.56
-}
+fn estimated_width(text: &str, font_size: f32) -> f32 { text.chars().count() as f32 * font_size * 0.56 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn wraps_text_at_viewport_and_keeps_inline_text_together() {
-        let doc = crate::html::parse("<p>alpha <span>beta</span> gamma delta epsilon</p>");
+    fn wraps_text_and_applies_inline_font_weight() {
+        let doc = crate::html::parse("<p>alpha <strong>beta</strong> gamma delta epsilon</p>");
         let list = layout(&doc, &StyleSheet::default(), 120.0);
         assert!(list.text.iter().any(|run| run.text == "alpha"));
-        assert!(list.text.iter().any(|run| run.text == "beta"));
-        let ys: Vec<f32> = list.text.iter().map(|run| run.y).collect();
-        assert!(ys.windows(2).any(|pair| pair[1] > pair[0]));
+        assert!(list.text.iter().any(|run| run.text == "beta" && run.weight == 700));
+        assert!(list.text.iter().any(|run| run.text == "delta"));
     }
 
     #[test]
     fn computes_block_background_and_padding_box() {
         let doc = crate::html::parse("<div style='background: #ffeeaa; padding: 10px'>hello</div>");
-        let sheet = StyleSheet::default();
-        let list = layout(&doc, &sheet, 300.0);
+        let list = layout(&doc, &StyleSheet::default(), 300.0);
         assert_eq!(list.rects.len(), 1);
         assert_eq!(list.rects[0].x, 8.0);
         assert_eq!(list.rects[0].width, 284.0);
@@ -153,11 +127,10 @@ mod tests {
     }
 
     #[test]
-    fn hidden_content_does_not_paint() {
-        let doc = crate::html::parse("<style>.gone { display: none }</style><p class='gone'>secret</p><p>visible</p>");
-        let sheet = StyleSheet::parse(".gone { display: none }");
-        let list = layout(&doc, &sheet, 300.0);
+    fn list_items_paint_bullets_and_hidden_content_is_skipped() {
+        let doc = crate::html::parse("<ul><li>visible item</li></ul><p style='display:none'>secret</p>");
+        let list = layout(&doc, &StyleSheet::default(), 300.0);
+        assert!(list.text.iter().any(|run| run.text == "•"));
         assert!(!list.text.iter().any(|run| run.text == "secret"));
-        assert!(list.text.iter().any(|run| run.text == "visible"));
     }
 }

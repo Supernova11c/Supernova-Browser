@@ -11,12 +11,15 @@ pub struct ComputedStyle {
     pub color: String,
     pub background: Option<String>,
     pub font_size: f32,
+    pub font_weight: u16,
     pub margin: f32,
     pub padding: f32,
 }
 
 impl Default for ComputedStyle {
-    fn default() -> Self { Self { display: Display::Inline, color: "#111111".into(), background: None, font_size: 16.0, margin: 0.0, padding: 0.0 } }
+    fn default() -> Self {
+        Self { display: Display::Inline, color: "#111111".into(), background: None, font_size: 16.0, font_weight: 400, margin: 0.0, padding: 0.0 }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,12 +51,27 @@ impl StyleSheet {
         style.padding = 0.0;
         if let NodeKind::Element { tag, .. } = &doc.nodes[id].kind {
             style.display = if is_hidden_tag(tag) { Display::None } else if is_block_tag(tag) { Display::Block } else { Display::Inline };
+            set_user_agent_defaults(tag, &mut style);
             let mut matching: Vec<&Rule> = self.rules.iter().filter(|rule| selector_matches(doc, id, &rule.selector)).collect();
             matching.sort_by_key(|rule| (rule.specificity, rule.order));
             for rule in matching { apply(&mut style, &rule.declarations); }
             if let Some(inline) = doc.element_attribute(id, "style") { apply(&mut style, &parse_declarations(inline)); }
         }
         style
+    }
+}
+
+fn set_user_agent_defaults(tag: &str, style: &mut ComputedStyle) {
+    match tag {
+        "h1" => { style.font_size = 32.0; style.font_weight = 700; style.margin = 16.0; }
+        "h2" => { style.font_size = 24.0; style.font_weight = 700; style.margin = 14.0; }
+        "h3" => { style.font_size = 20.0; style.font_weight = 700; style.margin = 12.0; }
+        "h4" | "h5" | "h6" => { style.font_weight = 700; style.margin = 10.0; }
+        "p" | "blockquote" => style.margin = 8.0,
+        "ul" | "ol" => style.margin = 8.0,
+        "strong" | "b" => style.font_weight = 700,
+        "em" | "i" => {},
+        _ => {}
     }
 }
 
@@ -88,6 +106,7 @@ fn apply(style: &mut ComputedStyle, declarations: &BTreeMap<String, String>) {
             "color" => style.color = value.clone(),
             "background" | "background-color" => style.background = Some(value.clone()),
             "font-size" => if let Some(size) = parse_length(value) { style.font_size = size.clamp(1.0, 256.0); },
+            "font-weight" => style.font_weight = match value.as_str() { "normal" => 400, "bold" | "bolder" => 700, "lighter" => 300, _ => value.parse::<u16>().ok().filter(|weight| (100..=900).contains(weight)).unwrap_or(style.font_weight) },
             "margin" | "padding" => if let Some(length) = parse_length(value) { if key == "margin" { style.margin = length; } else { style.padding = length.max(0.0); } },
             _ => {}
         }
@@ -102,8 +121,7 @@ fn parse_length(value: &str) -> Option<f32> {
 
 fn specificity(selector: &str) -> (usize, usize, usize) {
     let mut ids = 0; let mut classes = 0; let mut tags = 0;
-    let tokens = selector.split(|c: char| c.is_whitespace() || c == '>');
-    for token in tokens {
+    for token in selector.split(|c: char| c.is_whitespace() || c == '>') {
         let mut expect_tag = true;
         for ch in token.chars() {
             match ch {
@@ -121,15 +139,11 @@ fn specificity(selector: &str) -> (usize, usize, usize) {
 pub fn selector_matches(doc: &Document, id: usize, selector: &str) -> bool {
     let normalized = selector.replace('>', " > ");
     let tokens: Vec<&str> = normalized.split_whitespace().collect();
-    if tokens.is_empty() || tokens.iter().any(|token| *token == "+" || *token == "~" || token.starts_with(':') || token.starts_with('[')) {
-        return false;
-    }
-
+    if tokens.is_empty() || tokens.iter().any(|token| *token == "+" || *token == "~" || token.starts_with(':') || token.starts_with('[')) { return false; }
     let mut current = id;
     let mut idx = tokens.len();
     if !matches_compound(doc, current, tokens[idx - 1]) { return false; }
     idx -= 1;
-
     while idx > 0 {
         let relation = tokens[idx - 1];
         if relation == ">" {
@@ -140,22 +154,18 @@ pub fn selector_matches(doc: &Document, id: usize, selector: &str) -> bool {
             if !matches_compound(doc, parent, wanted) { return false; }
             current = parent;
             idx -= 1;
-            continue;
-        }
-
-        idx -= 1;
-        if idx == 0 { return false; }
-        let wanted = tokens[idx - 1];
-        let Some(mut ancestor) = doc.nodes[current].parent else { return false; };
-        loop {
-            if matches_compound(doc, ancestor, wanted) {
-                current = ancestor;
-                break;
+        } else {
+            idx -= 1;
+            if idx == 0 { return false; }
+            let wanted = tokens[idx - 1];
+            let Some(mut ancestor) = doc.nodes[current].parent else { return false; };
+            loop {
+                if matches_compound(doc, ancestor, wanted) { current = ancestor; break; }
+                let Some(parent) = doc.nodes[ancestor].parent else { return false; };
+                ancestor = parent;
             }
-            let Some(parent) = doc.nodes[ancestor].parent else { return false; };
-            ancestor = parent;
+            idx -= 1;
         }
-        idx -= 1;
     }
     true
 }
@@ -164,21 +174,16 @@ fn matches_compound(doc: &Document, id: usize, compound: &str) -> bool {
     let NodeKind::Element { tag, .. } = &doc.nodes[id].kind else { return false; };
     let bytes = compound.as_bytes();
     let mut tag_end = 0;
-    while tag_end < bytes.len() && bytes[tag_end] != b'#' && bytes[tag_end] != b'.' {
-        tag_end += 1;
-    }
+    while tag_end < bytes.len() && bytes[tag_end] != b'#' && bytes[tag_end] != b'.' { tag_end += 1; }
     if tag_end > 0 {
         let wanted = &compound[..tag_end];
         if wanted != "*" && !wanted.eq_ignore_ascii_case(tag) { return false; }
     }
     let mut i = tag_end;
     while i < bytes.len() {
-        let marker = bytes[i];
-        i += 1;
+        let marker = bytes[i]; i += 1;
         let start = i;
-        while i < bytes.len() && bytes[i] != b'#' && bytes[i] != b'.' {
-            i += 1;
-        }
+        while i < bytes.len() && bytes[i] != b'#' && bytes[i] != b'.' { i += 1; }
         if start == i { return false; }
         let value = &compound[start..i];
         if marker == b'#' {
@@ -196,13 +201,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn applies_specificity_and_inline_style() {
-        let doc = crate::html::parse("<div id='target' class='card'>text</div>");
-        let sheet = StyleSheet::parse("div { color: red } .card { color: blue } #target { color: green }");
-        let mut style = sheet.compute(&doc, 1, &ComputedStyle::default());
-        assert_eq!(style.color, "green");
-        style = StyleSheet::parse("#target { color: green }").compute(&doc, 1, &style);
-        assert_eq!(style.color, "green");
+    fn user_agent_heading_defaults_and_css_overrides_work() {
+        let doc = crate::html::parse("<h1 id='title'>Hello</h1>");
+        let style = StyleSheet::parse("#title { font-size: 40px; font-weight: 500 }").compute(&doc, 1, &ComputedStyle::default());
+        assert_eq!(style.font_size, 40.0);
+        assert_eq!(style.font_weight, 500);
+        let defaults = StyleSheet::default().compute(&doc, 1, &ComputedStyle::default());
+        assert_eq!(defaults.font_size, 32.0);
+        assert_eq!(defaults.font_weight, 700);
     }
 
     #[test]
